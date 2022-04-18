@@ -56,6 +56,10 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import build.buildfarm.common.resources.DownloadBlobRequest;
+import build.buildfarm.common.resources.BlobInformation;
+import build.buildfarm.common.resources.ResourceParser;
+import build.bazel.remote.execution.v2.Compressor;
 
 public class ByteStreamService extends ByteStreamImplBase {
   private static final Logger logger = Logger.getLogger(ByteStreamService.class.getName());
@@ -158,7 +162,7 @@ public class ByteStreamService extends ByteStreamImplBase {
   }
 
   ServerCallStreamObserver<ReadResponse> onErrorLogReadObserver(
-      String name, long offset, ServerCallStreamObserver<ReadResponse> delegate) {
+      String name, Compressor.Value compressor, long offset, ServerCallStreamObserver<ReadResponse> delegate) {
     return new UniformDelegateServerCallStreamObserver<ReadResponse>(delegate) {
       long responseCount = 0;
       long responseBytes = 0;
@@ -228,18 +232,19 @@ public class ByteStreamService extends ByteStreamImplBase {
 
   void readLimitedBlob(
       Instance instance,
-      Digest digest,
+      DownloadBlobRequest downloadBlobRequest,
       long offset,
       long limit,
       StreamObserver<ReadResponse> responseObserver) {
     ServerCallStreamObserver<ReadResponse> target =
         onErrorLogReadObserver(
-            format("%s(%s)", DigestUtil.toString(digest), instance.getName()),
+            format("%s(%s)", DigestUtil.toString(downloadBlobRequest.getBlob().getDigest()), instance.getName()),
+            Compressor.Value.IDENTITY,
             offset,
             (ServerCallStreamObserver<ReadResponse>) responseObserver);
     try {
       instance.getBlob(
-          digest,
+          downloadBlobRequest.getBlob().getDigest(),
           offset,
           limit,
           newChunkObserver(target),
@@ -251,11 +256,11 @@ public class ByteStreamService extends ByteStreamImplBase {
 
   void readBlob(
       Instance instance,
-      Digest digest,
+      DownloadBlobRequest downloadBlobRequest,
       long offset,
       long limit,
       StreamObserver<ReadResponse> responseObserver) {
-    long available = digest.getSizeBytes() - offset;
+    long available = downloadBlobRequest.getBlob().getDigest().getSizeBytes() - offset;
     if (available == 0) {
       responseObserver.onCompleted();
     } else if (available < 0) {
@@ -266,7 +271,7 @@ public class ByteStreamService extends ByteStreamImplBase {
       } else {
         limit = Math.min(available, limit);
       }
-      readLimitedBlob(instance, digest, offset, limit, responseObserver);
+      readLimitedBlob(instance, downloadBlobRequest, offset, limit, responseObserver);
     }
   }
 
@@ -290,7 +295,7 @@ public class ByteStreamService extends ByteStreamImplBase {
               logger.log(Level.SEVERE, "error closing stream", e);
             }
           });
-      readFrom(in, limit, onErrorLogReadObserver(resourceName, offset, target));
+      readFrom(in, limit, onErrorLogReadObserver(resourceName, Compressor.Value.IDENTITY, offset, target));
     } catch (NoSuchFileException e) {
       responseObserver.onError(NOT_FOUND.asException());
     } catch (IOException e) {
@@ -303,7 +308,8 @@ public class ByteStreamService extends ByteStreamImplBase {
       throws InvalidResourceNameException {
     switch (detectResourceOperation(resourceName)) {
       case DOWNLOAD_BLOB_REQUEST:
-        readBlob(instance, parseBlobDigest(resourceName), offset, limit, responseObserver);
+        DownloadBlobRequest downloadBlobRequest = ResourceParser.parseDownloadBlobRequest(resourceName);
+        readBlob(instance, downloadBlobRequest, offset, limit, responseObserver);
         break;
       case STREAM_OPERATION_REQUEST:
         readOperationStream(instance, resourceName, offset, limit, responseObserver);
