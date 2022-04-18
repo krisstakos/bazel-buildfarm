@@ -29,6 +29,7 @@ import build.buildfarm.common.DigestUtil;
 import build.buildfarm.common.EntryLimitException;
 import build.buildfarm.common.UrlPath.InvalidResourceNameException;
 import build.buildfarm.common.Write;
+import build.buildfarm.common.CompressionUtils;
 import build.buildfarm.common.Write.CompleteWrite;
 import build.buildfarm.common.grpc.DelegateServerCallStreamObserver;
 import build.buildfarm.common.grpc.TracingMetadataUtils;
@@ -160,6 +161,12 @@ public class ByteStreamService extends ByteStreamImplBase {
     }
     target.setOnReadyHandler(new ReadFromOnReadyHandler());
   }
+  
+  private void handleDecompression(ReadResponse response, Compressor.Value compressor){
+    if (compressor == Compressor.Value.ZSTD){
+      response = ReadResponse.newBuilder().setData(CompressionUtils.zstdDecompress(response.getData())).build();
+    }
+  }
 
   ServerCallStreamObserver<ReadResponse> onErrorLogReadObserver(
       String name, Compressor.Value compressor, long offset, ServerCallStreamObserver<ReadResponse> delegate) {
@@ -169,6 +176,7 @@ public class ByteStreamService extends ByteStreamImplBase {
 
       @Override
       public void onNext(ReadResponse response) {
+        handleDecompression(response,compressor);
         delegate.onNext(response);
         responseCount++;
         responseBytes += response.getData().size();
