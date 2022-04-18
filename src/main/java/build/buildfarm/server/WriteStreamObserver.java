@@ -23,14 +23,17 @@ import static io.grpc.Status.ABORTED;
 import static io.grpc.Status.INVALID_ARGUMENT;
 import static java.lang.String.format;
 
+import build.bazel.remote.execution.v2.Compressor;
 import build.bazel.remote.execution.v2.Digest;
 import build.bazel.remote.execution.v2.RequestMetadata;
 import build.buildfarm.cas.DigestMismatchException;
+import build.buildfarm.common.CompressionUtils;
 import build.buildfarm.common.EntryLimitException;
 import build.buildfarm.common.UrlPath.InvalidResourceNameException;
 import build.buildfarm.common.Write;
 import build.buildfarm.common.grpc.TracingMetadataUtils;
 import build.buildfarm.common.io.FeedbackOutputStream;
+import build.buildfarm.common.resources.ResourceParser;
 import build.buildfarm.instance.Instance;
 import com.google.bytestream.ByteStreamProto.WriteRequest;
 import com.google.bytestream.ByteStreamProto.WriteResponse;
@@ -73,6 +76,7 @@ class WriteStreamObserver implements StreamObserver<WriteRequest> {
   private long earliestOffset = -1;
   private long requestCount = 0;
   private long requestBytes = 0;
+  private Compressor.Value compressor;
 
   WriteStreamObserver(
       Instance instance,
@@ -197,6 +201,7 @@ class WriteStreamObserver implements StreamObserver<WriteRequest> {
   @GuardedBy("this")
   private void initialize(WriteRequest request) {
     String resourceName = request.getResourceName();
+    compressor = ResourceParser.parseUploadBlobRequest(resourceName).getBlob().getCompression();
     if (resourceName.isEmpty()) {
       errorResponse(INVALID_ARGUMENT.withDescription("resource_name is empty").asException());
     } else {
@@ -289,6 +294,12 @@ class WriteStreamObserver implements StreamObserver<WriteRequest> {
     return write.getCommittedSize();
   }
 
+  private static void handleCompression(ByteString data, Compressor.Value compressor) {
+    if (compressor == Compressor.Value.ZSTD) {
+      data = CompressionUtils.zstdCompress(data);
+    }
+  }
+
   @GuardedBy("this")
   private void handleWrite(String resourceName, long offset, ByteString data, boolean finishWrite)
       throws EntryLimitException {
@@ -327,6 +338,8 @@ class WriteStreamObserver implements StreamObserver<WriteRequest> {
       if (earliestOffset < 0 || offset < earliestOffset) {
         earliestOffset = offset;
       }
+
+      handleCompression(data, compressor);
 
       // we may have a committedSize that is larger than our offset, in which case we want
       // to skip the data bytes until the committedSize. This is practical with our streams,

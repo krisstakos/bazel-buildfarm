@@ -24,17 +24,20 @@ import static io.grpc.Status.NOT_FOUND;
 import static io.grpc.Status.OUT_OF_RANGE;
 import static java.lang.String.format;
 
+import build.bazel.remote.execution.v2.Compressor;
 import build.bazel.remote.execution.v2.Digest;
+import build.buildfarm.common.CompressionUtils;
 import build.buildfarm.common.DigestUtil;
 import build.buildfarm.common.EntryLimitException;
 import build.buildfarm.common.UrlPath.InvalidResourceNameException;
 import build.buildfarm.common.Write;
-import build.buildfarm.common.CompressionUtils;
 import build.buildfarm.common.Write.CompleteWrite;
 import build.buildfarm.common.grpc.DelegateServerCallStreamObserver;
 import build.buildfarm.common.grpc.TracingMetadataUtils;
 import build.buildfarm.common.grpc.UniformDelegateServerCallStreamObserver;
 import build.buildfarm.common.io.FeedbackOutputStream;
+import build.buildfarm.common.resources.DownloadBlobRequest;
+import build.buildfarm.common.resources.ResourceParser;
 import build.buildfarm.instance.Instance;
 import com.google.bytestream.ByteStreamGrpc.ByteStreamImplBase;
 import com.google.bytestream.ByteStreamProto.QueryWriteStatusRequest;
@@ -57,10 +60,6 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import build.buildfarm.common.resources.DownloadBlobRequest;
-import build.buildfarm.common.resources.BlobInformation;
-import build.buildfarm.common.resources.ResourceParser;
-import build.bazel.remote.execution.v2.Compressor;
 
 public class ByteStreamService extends ByteStreamImplBase {
   private static final Logger logger = Logger.getLogger(ByteStreamService.class.getName());
@@ -161,22 +160,28 @@ public class ByteStreamService extends ByteStreamImplBase {
     }
     target.setOnReadyHandler(new ReadFromOnReadyHandler());
   }
-  
-  private void handleDecompression(ReadResponse response, Compressor.Value compressor){
-    if (compressor == Compressor.Value.ZSTD){
-      response = ReadResponse.newBuilder().setData(CompressionUtils.zstdDecompress(response.getData())).build();
+
+  private static void handleDecompression(ReadResponse response, Compressor.Value compressor) {
+    if (compressor == Compressor.Value.ZSTD) {
+      response =
+          ReadResponse.newBuilder()
+              .setData(CompressionUtils.zstdDecompress(response.getData()))
+              .build();
     }
   }
 
   ServerCallStreamObserver<ReadResponse> onErrorLogReadObserver(
-      String name, Compressor.Value compressor, long offset, ServerCallStreamObserver<ReadResponse> delegate) {
+      String name,
+      Compressor.Value compressor,
+      long offset,
+      ServerCallStreamObserver<ReadResponse> delegate) {
     return new UniformDelegateServerCallStreamObserver<ReadResponse>(delegate) {
       long responseCount = 0;
       long responseBytes = 0;
 
       @Override
       public void onNext(ReadResponse response) {
-        handleDecompression(response,compressor);
+        handleDecompression(response, compressor);
         delegate.onNext(response);
         responseCount++;
         responseBytes += response.getData().size();
@@ -246,7 +251,9 @@ public class ByteStreamService extends ByteStreamImplBase {
       StreamObserver<ReadResponse> responseObserver) {
     ServerCallStreamObserver<ReadResponse> target =
         onErrorLogReadObserver(
-            format("%s(%s)", DigestUtil.toString(downloadBlobRequest.getBlob().getDigest()), instance.getName()),
+            format(
+                "%s(%s)",
+                DigestUtil.toString(downloadBlobRequest.getBlob().getDigest()), instance.getName()),
             Compressor.Value.IDENTITY,
             offset,
             (ServerCallStreamObserver<ReadResponse>) responseObserver);
@@ -303,7 +310,10 @@ public class ByteStreamService extends ByteStreamImplBase {
               logger.log(Level.SEVERE, "error closing stream", e);
             }
           });
-      readFrom(in, limit, onErrorLogReadObserver(resourceName, Compressor.Value.IDENTITY, offset, target));
+      readFrom(
+          in,
+          limit,
+          onErrorLogReadObserver(resourceName, Compressor.Value.IDENTITY, offset, target));
     } catch (NoSuchFileException e) {
       responseObserver.onError(NOT_FOUND.asException());
     } catch (IOException e) {
@@ -316,7 +326,8 @@ public class ByteStreamService extends ByteStreamImplBase {
       throws InvalidResourceNameException {
     switch (detectResourceOperation(resourceName)) {
       case DOWNLOAD_BLOB_REQUEST:
-        DownloadBlobRequest downloadBlobRequest = ResourceParser.parseDownloadBlobRequest(resourceName);
+        DownloadBlobRequest downloadBlobRequest =
+            ResourceParser.parseDownloadBlobRequest(resourceName);
         readBlob(instance, downloadBlobRequest, offset, limit, responseObserver);
         break;
       case STREAM_OPERATION_REQUEST:
@@ -453,6 +464,7 @@ public class ByteStreamService extends ByteStreamImplBase {
   public StreamObserver<WriteRequest> write(StreamObserver<WriteResponse> responseObserver) {
     ServerCallStreamObserver<WriteResponse> serverCallStreamObserver =
         initializeBackPressure(responseObserver);
+
     return new WriteStreamObserver(
         instance,
         deadlineAfter,
